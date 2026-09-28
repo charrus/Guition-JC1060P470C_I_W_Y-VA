@@ -1,0 +1,6 @@
+# Real credentials; only secrets.example.yaml is tracked
+secrets.yaml
+
+# ESPHome build output and firmware binaries
+.esphome/
+*.bin

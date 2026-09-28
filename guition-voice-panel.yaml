@@ -1,0 +1,1315 @@
+# Guition JC1060P470C_I_W_Y - Home Assistant control panel + push-to-talk
+# Requires ESPHome 2026.9.0 or later. See Guition-Setup.md before flashing.
+# Edit the entity IDs and room labels below. These are examples, not detected devices.
+# Room buttons stay disabled until HA supplies an on/off state for their entity.
+# Audio uses the ES8311 analog microphone path: use_microphone: false is intentional.
+# This setting selects ANALOG input; it does not disable microphone capture.
+# No ES7210 is fitted on the referenced _I_W_Y V1.0 schematic.
+# All audio runs at 16 kHz / 16 bit. No wake word or continuous recording.
+# PTT release mutes input so HA silence detection can finish STT; stop aborts it.
+# After STT, stop the named microphone source to release the shared I2S bus.
+# Sendspin music and Assist announcements share the speaker through a mixer.
+# p4_engineering_sample: true targets ESP32-P4 rev < 3.0; see setup guide for newer chips.
+# Ethernet is preferred; Wi-Fi stays connected for automatic fallback.
+# Built-in fonts only: no external font files or GitHub component packages required.
+
+substitutions:
+  name: guition-voice-panel
+  friendly_name: Guition Voice Panel
+  panel_title: Home
+  timezone: Europe/London
+  room_1_name: Living room
+  room_1_entity: light.living_room
+  room_2_name: Kitchen
+  room_2_entity: light.kitchen
+  room_3_name: Bedroom
+  room_3_entity: light.bedroom
+  room_4_name: Hallway
+  room_4_entity: light.hallway
+  temperature_entity: sensor.living_room_temperature
+  humidity_entity: sensor.living_room_humidity
+  p4_engineering_sample: 'true'
+  display_reset_pin: GPIO5
+  microphone_pin: GPIO48
+  amplifier_pin: GPIO11
+  microphone_channel: left
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  min_version: 2026.9.0
+  on_boot:
+  - priority: -100
+    then:
+    - lambda: !lambda |-
+        id(ui_ready) = true;
+        id(voice_volume).publish_state(id(panel_media_player).volume * 100.0f);
+    - script.execute: wake_screen
+    - script.execute: refresh_ui
+esp32:
+  variant: ESP32P4
+  flash_size: 16MB
+  cpu_frequency: 360MHz
+  engineering_sample: ${p4_engineering_sample}
+  framework:
+    type: esp-idf
+    sdkconfig_options:
+      # ESP-IDF 5.5.5/P4 startup workaround: keep main_task's stack out of SPM.
+      # https://github.com/espressif/esp-idf/issues/19020
+      CONFIG_ESP_MAIN_TASK_STACK_SIZE: "16384"
+    advanced:
+      execute_from_psram: true
+psram:
+  mode: hex
+  speed: 200MHz
+esp_ldo:
+- channel: 3
+  voltage: 2.5V
+esp32_hosted:
+  variant: ESP32C6
+  reset_pin: GPIO54
+  cmd_pin: GPIO19
+  clk_pin: GPIO18
+  d0_pin: GPIO14
+  d1_pin: GPIO15
+  d2_pin: GPIO16
+  d3_pin: GPIO17
+  active_high: true
+network:
+  priority:
+  - ethernet
+  - wifi
+ethernet:
+  id: panel_ethernet
+  type: IP101
+  mdc_pin: GPIO31
+  mdio_pin: GPIO52
+  clk:
+    pin: GPIO50
+    mode: CLK_EXT_IN
+  phy_addr: 1
+  power_pin: GPIO51
+  enable_on_boot: true
+wifi:
+  id: panel_wifi
+  enable_on_boot: true
+  # Loss of the fallback Wi-Fi must not reboot a panel using Ethernet.
+  reboot_timeout: 0s
+  ssid: !secret 'wifi_ssid'
+  password: !secret 'wifi_password'
+  power_save_mode: none
+  ap:
+    ssid: Guition Panel Setup
+    password: !secret 'guition_fallback_password'
+captive_portal: {}
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    component: WARN
+    light: WARN
+    sensor: WARN
+api:
+  id: ha_api
+  encryption:
+    key: !secret 'guition_api_key'
+  reboot_timeout: 0s
+ota:
+- platform: esphome
+  encryption: {}
+preferences:
+  flash_write_interval: 5min
+i2c:
+  id: internal_i2c
+  sda: GPIO7
+  scl: GPIO8
+  frequency: 400kHz
+  scan: true
+output:
+- platform: ledc
+  id: backlight_pwm
+  pin: GPIO23
+  frequency: 1000Hz
+light:
+- platform: monochromatic
+  id: backlight
+  name: Display backlight
+  output: backlight_pwm
+  restore_mode: ALWAYS_ON
+  default_transition_length: 250ms
+  gamma_correct: 1.0
+  initial_state:
+    state: true
+    brightness: 80%
+display:
+- platform: mipi_dsi
+  model: JC1060P470
+  id: panel_display
+  reset_pin: ${display_reset_pin}
+  hsync_pulse_width: 20
+  rotation: 0
+  update_interval: never
+  auto_clear_enabled: false
+touchscreen:
+- platform: gt911
+  id: panel_touch
+  i2c_id: internal_i2c
+  display: panel_display
+  address: 93
+  reset_pin: GPIO22
+  interrupt_pin: GPIO21
+  update_interval: 20ms
+  on_touch:
+  - script.execute: wake_screen
+i2s_audio:
+- id: audio_bus
+  i2s_lrclk_pin: GPIO10
+  i2s_bclk_pin: GPIO12
+  i2s_mclk_pin: GPIO13
+audio_dac:
+- platform: es8311
+  id: audio_codec
+  i2c_id: internal_i2c
+  address: 24
+  sample_rate: 16000
+  bits_per_sample: 16bit
+  use_mclk: true
+  use_microphone: false
+  mic_gain: 24DB
+microphone:
+- platform: i2s_audio
+  id: panel_microphone
+  i2s_audio_id: audio_bus
+  adc_type: external
+  i2s_din_pin: ${microphone_pin}
+  pdm: false
+  sample_rate: 16000
+  bits_per_sample: 16bit
+  channel: ${microphone_channel}
+speaker:
+- platform: i2s_audio
+  id: panel_speaker
+  i2s_audio_id: audio_bus
+  dac_type: external
+  i2s_dout_pin: GPIO9
+  audio_dac: audio_codec
+  sample_rate: 16000
+  bits_per_sample: 16bit
+  channel: mono
+  buffer_duration: 200ms
+  timeout: 500ms
+# The mixer also converts incoming Sendspin stereo to this board's mono output.
+- platform: mixer
+  id: panel_audio_mixer
+  output_speaker: panel_speaker
+  num_channels: 1
+  source_speakers:
+  - id: announcement_speaker
+    timeout: 500ms
+  - id: music_speaker
+    num_channels: 2
+    timeout: 500ms
+sendspin:
+  id: panel_sendspin
+media_source:
+- platform: sendspin
+  id: sendspin_source
+  sendspin_id: panel_sendspin
+  sample_rate: 16000
+  codecs: [flac, pcm]
+  buffer_size: 1000000
+- platform: audio_http
+  id: announcement_http_source
+  buffer_size: 100000
+- platform: audio_http
+  id: music_http_source
+  buffer_size: 100000
+media_player:
+- platform: speaker_source
+  id: panel_media_player
+  name: Panel audio
+  announcement_pipeline:
+    speaker: announcement_speaker
+    sources: [announcement_http_source]
+    format: FLAC
+    sample_rate: 16000
+    num_channels: 1
+  media_pipeline:
+    speaker: music_speaker
+    sources: [sendspin_source, music_http_source]
+    format: FLAC
+    sample_rate: 16000
+    num_channels: 2
+  volume_initial: 55%
+  # This player owns volume/mute restoration. The number and slider mirror it.
+  on_volume:
+  - lambda: !lambda |-
+      id(voice_volume).publish_state(x * 100.0f);
+  - script.execute: refresh_ui
+  on_mute:
+  - script.execute: refresh_ui
+  on_unmute:
+  - script.execute: refresh_ui
+  on_announcement:
+  - script.execute: audio_output_started
+  - mixer_speaker.apply_ducking:
+      id: music_speaker
+      decibel_reduction: 24
+      duration: 100ms
+  - lambda: !lambda |-
+      id(voice_phase) = 4; id(phase_since) = millis();
+  - script.execute: wake_screen
+  - script.execute: refresh_ui
+  on_play:
+  - script.execute: audio_output_started
+  - mixer_speaker.apply_ducking:
+      id: music_speaker
+      decibel_reduction: 0
+      duration: 500ms
+  - script.execute: wake_screen
+  - script.execute: refresh_ui
+  on_pause:
+  - script.execute: reset_music_ducking
+  - script.execute: refresh_ui
+  on_idle:
+  - script.execute: reset_music_ducking
+  - lambda: !lambda |-
+      if (!id(request_pending) && id(voice_phase) == 4) id(voice_phase) = 0;
+      id(phase_since) = millis();
+  - script.execute: refresh_ui
+- platform: sendspin
+  id: sendspin_group
+  sendspin_id: panel_sendspin
+  name: Sendspin group
+  # Group play/pause/volume affects every member. Panel audio volume is local.
+globals:
+- id: ui_ready
+  type: bool
+  restore_value: false
+  initial_value: 'false'
+- id: assist_connected
+  type: bool
+  restore_value: false
+  initial_value: 'false'
+- id: ptt_held
+  type: bool
+  restore_value: false
+  initial_value: 'false'
+- id: request_pending
+  type: bool
+  restore_value: false
+  initial_value: 'false'
+- id: pipeline_done
+  type: bool
+  restore_value: false
+  initial_value: 'false'
+- id: voice_cancelled
+  type: bool
+  restore_value: false
+  initial_value: 'false'
+- id: voice_phase
+  type: int
+  restore_value: false
+  initial_value: '0'
+- id: phase_since
+  type: uint32_t
+  restore_value: false
+  initial_value: '0'
+- id: press_since
+  type: uint32_t
+  restore_value: false
+  initial_value: '0'
+- id: last_touch
+  type: uint32_t
+  restore_value: false
+  initial_value: '0'
+- id: screen_dimmed
+  type: bool
+  restore_value: false
+  initial_value: 'false'
+switch:
+- platform: gpio
+  id: amplifier
+  pin: ${amplifier_pin}
+  internal: true
+  restore_mode: ALWAYS_ON
+- platform: template
+  id: microphone_muted
+  name: Microphone muted
+  icon: mdi:microphone-off
+  optimistic: true
+  restore_mode: RESTORE_DEFAULT_OFF
+  turn_on_action:
+  - microphone.mute: panel_microphone
+  - if:
+      condition:
+        lambda: !lambda |-
+          return id(ui_ready);
+      then:
+      - script.execute: cancel_assist
+  turn_off_action:
+  # Unmuting the master switch must not reopen a released command's audio.
+  # The next accepted PTT press unmutes the microphone itself.
+  - if:
+      condition:
+        lambda: !lambda |-
+          return id(ptt_held) && id(voice_phase) == 2;
+      then:
+      - microphone.unmute: panel_microphone
+  - script.execute: refresh_ui
+number:
+- platform: template
+  id: voice_volume
+  name: Voice volume
+  icon: mdi:volume-high
+  min_value: 0
+  max_value: 100
+  step: 1
+  unit_of_measurement: '%'
+  optimistic: true
+  restore_value: false
+  initial_value: 55
+  set_action:
+  - media_player.volume_set:
+      id: panel_media_player
+      volume: !lambda |-
+        return x / 100.0f;
+  - lvgl.slider.update:
+      id: volume_slider
+      value: !lambda |-
+        return x;
+      animated: false
+- platform: template
+  id: screen_brightness
+  name: Screen brightness
+  icon: mdi:brightness-6
+  min_value: 10
+  max_value: 100
+  step: 1
+  unit_of_measurement: '%'
+  optimistic: true
+  restore_value: true
+  initial_value: 80
+  set_action:
+  - light.turn_on:
+      id: backlight
+      brightness: !lambda |-
+        return x / 100.0f;
+  - lvgl.slider.update:
+      id: brightness_slider
+      value: !lambda |-
+        return x;
+      animated: false
+  - lambda: !lambda |-
+      id(screen_dimmed) = false; id(last_touch) = millis();
+button:
+- platform: restart
+  id: panel_restart
+  name: Restart panel
+  entity_category: diagnostic
+binary_sensor:
+- platform: status
+  name: Online
+  id: panel_online
+sensor:
+- platform: wifi_signal
+  name: Wi-Fi signal
+  id: wifi_rssi
+  update_interval: 30s
+- platform: uptime
+  name: Uptime
+  update_interval: 60s
+- platform: homeassistant
+  id: room_temperature
+  entity_id: ${temperature_entity}
+  internal: true
+- platform: homeassistant
+  id: room_humidity
+  entity_id: ${humidity_entity}
+  internal: true
+text_sensor:
+- platform: sendspin
+  id: sendspin_title
+  sendspin_id: panel_sendspin
+  name: Sendspin track
+  type: title
+  on_value:
+  - script.execute: refresh_ui
+- platform: sendspin
+  id: sendspin_artist
+  sendspin_id: panel_sendspin
+  name: Sendspin artist
+  type: artist
+  on_value:
+  - script.execute: refresh_ui
+- platform: template
+  id: panel_network_interface
+  name: Network interface
+  entity_category: diagnostic
+  update_interval: 2s
+  lambda: !lambda |-
+    if (id(panel_ethernet).is_connected()) return {"Ethernet"};
+    if (id(panel_wifi).is_connected()) return {"Wi-Fi"};
+    return {"Disconnected"};
+- platform: template
+  id: panel_ip
+  name: IP address
+  entity_category: diagnostic
+  update_interval: 2s
+  lambda: !lambda |-
+    if (!network::is_connected()) return {""};
+    const auto addresses = network::get_ip_addresses();
+    char buffer[network::IP_ADDRESS_BUFFER_SIZE];
+    addresses[0].str_to(buffer);
+    return std::string(buffer);
+- platform: ethernet_info
+  ip_address:
+    name: Ethernet IP address
+    id: panel_ethernet_ip
+- platform: wifi_info
+  ip_address:
+    name: Wi-Fi IP address
+    id: panel_wifi_ip
+- platform: homeassistant
+  id: room_1_state
+  entity_id: ${room_1_entity}
+  internal: true
+  on_value:
+  - script.execute: refresh_ui
+- platform: homeassistant
+  id: room_2_state
+  entity_id: ${room_2_entity}
+  internal: true
+  on_value:
+  - script.execute: refresh_ui
+- platform: homeassistant
+  id: room_3_state
+  entity_id: ${room_3_entity}
+  internal: true
+  on_value:
+  - script.execute: refresh_ui
+- platform: homeassistant
+  id: room_4_state
+  entity_id: ${room_4_entity}
+  internal: true
+  on_value:
+  - script.execute: refresh_ui
+time:
+- platform: homeassistant
+  id: ha_time
+  timezone: ${timezone}
+  on_time_sync:
+  - script.execute: refresh_ui
+voice_assistant:
+  id: va
+  microphone:
+    id: assist_microphone_source
+    microphone: panel_microphone
+  media_player: panel_media_player
+  use_wake_word: false
+  noise_suppression_level: 2
+  auto_gain: 15dBFS
+  volume_multiplier: 1.0
+  on_client_connected:
+  - lambda: !lambda |-
+      id(assist_connected) = true;
+  - script.execute: refresh_ui
+  on_client_disconnected:
+  - lambda: !lambda |-
+      id(assist_connected) = false; id(request_pending) = false; id(pipeline_done) = true;
+  - script.execute: cancel_assist
+  on_listening:
+  - if:
+      condition:
+        lambda: !lambda |-
+          return id(ptt_held) && !id(microphone_muted).state;
+      then:
+      - lambda: !lambda |-
+          id(voice_phase) = 2; id(phase_since) = millis();
+      - script.execute: refresh_ui
+      else:
+      - voice_assistant.stop: {}
+  on_stt_vad_end:
+  - script.execute: release_microphone
+  - switch.turn_on: amplifier
+  - lambda: !lambda |-
+      ESP_LOGD("ptt", "Speech capture complete; waiting for recognition and intent");
+      if (!id(voice_cancelled)) id(voice_phase) = 3;
+      id(phase_since) = millis();
+  - script.execute: refresh_ui
+  on_stt_end:
+  # Also release here if STT returns text without a separate VAD-end event.
+  - script.execute: release_microphone
+  - lambda: !lambda |-
+      id(voice_phase) = 3; id(phase_since) = millis();
+  - lvgl.label.update:
+      id: request_text
+      text: !lambda |-
+        return x;
+  - script.execute: refresh_ui
+  on_intent_start:
+  - lambda: !lambda |-
+      id(voice_phase) = 3; id(phase_since) = millis();
+  on_tts_start:
+  # Last-resort handoff before ESPHome sends the TTS URL to the media player.
+  - script.execute: release_microphone
+  - switch.turn_on: amplifier
+  - lambda: !lambda |-
+      id(voice_phase) = 3; id(phase_since) = millis();
+  - lvgl.label.update:
+      id: reply_text
+      text: !lambda |-
+        return x;
+  on_end:
+  - script.execute: release_microphone
+  - lambda: !lambda |-
+      id(pipeline_done) = true; id(phase_since) = millis();
+  on_error:
+  - script.execute: release_microphone
+  - lambda: !lambda |-
+      id(ptt_held) = false; id(request_pending) = false; id(pipeline_done) = true;
+  - switch.turn_on: amplifier
+  - lambda: !lambda |-
+      id(voice_phase) = 5; id(phase_since) = millis();
+  - lvgl.label.update:
+      id: reply_text
+      text: !lambda |-
+        return code + ": " + message;
+  - script.execute: refresh_ui
+script:
+- id: reset_music_ducking
+  mode: restart
+  then:
+  - mixer_speaker.apply_ducking:
+      id: music_speaker
+      decibel_reduction: 0
+      duration: 500ms
+- id: audio_output_started
+  mode: restart
+  then:
+  # External music or announcements may arrive while capture is active.
+  # Cancel capture and stop its owning source before the output needs the bus.
+  - lambda: !lambda |-
+      if (id(voice_phase) == 1 || id(voice_phase) == 2 || !id(assist_microphone_source).is_stopped()) {
+        ESP_LOGD("ptt", "Incoming media interrupted speech capture");
+        id(voice_cancelled) = true;
+        id(ptt_held) = false;
+        id(pipeline_done) = true;
+        id(va).request_stop();
+      }
+  - script.execute: release_microphone
+  - switch.turn_on: amplifier
+- id: release_microphone
+  mode: restart
+  then:
+  - microphone.mute: panel_microphone
+  - lambda: !lambda |-
+      // Stop the owning source, keeping its enabled state and listener count
+      // in sync. Stopping only the raw mic can break the next PTT request.
+      id(assist_microphone_source).stop();
+      ESP_LOGD("audio_handoff", "Mic source released; driver stopped=%s",
+               id(panel_microphone).is_stopped() ? "yes" : "no");
+  - wait_until:
+      condition:
+        lambda: !lambda |-
+          return id(panel_microphone).is_stopped();
+      timeout: 1s
+  - lambda: !lambda |-
+      if (id(panel_microphone).is_stopped()) {
+        ESP_LOGD("audio_handoff", "Microphone driver stopped; input released the I2S bus");
+      } else {
+        ESP_LOGW("audio_handoff", "Microphone still active after 1s; check for another capture owner");
+      }
+- id: wake_screen
+  mode: restart
+  then:
+  - lambda: !lambda |-
+      id(last_touch) = millis(); id(screen_dimmed) = false;
+  - light.turn_on:
+      id: backlight
+      brightness: !lambda |-
+        return id(screen_brightness).state / 100.0f;
+- id: ptt_start
+  mode: single
+  then:
+  - if:
+      condition:
+        lambda: !lambda |-
+          return id(assist_connected) && !id(microphone_muted).state && !id(request_pending) && !id(va).is_running() && id(panel_microphone).is_stopped() && id(panel_media_player).state == media_player::MEDIA_PLAYER_STATE_IDLE && id(panel_speaker).is_stopped();
+      then:
+      - lambda: !lambda |-
+          id(ptt_held) = true; id(request_pending) = true; id(pipeline_done) = false; id(voice_cancelled) = false; id(press_since) = millis();
+      - lambda: !lambda |-
+          id(voice_phase) = 1; id(phase_since) = millis();
+          ESP_LOGD("ptt", "Starting voice request");
+      - microphone.unmute: panel_microphone
+      - switch.turn_off: amplifier
+      - script.execute: wake_screen
+      - lvgl.label.update:
+          id: request_text
+          text: Waiting for speech...
+      - lvgl.label.update:
+          id: reply_text
+          text: Your reply will appear here.
+      - voice_assistant.start:
+          silence_detection: true
+      - script.execute: refresh_ui
+- id: ptt_release
+  mode: single
+  then:
+  - if:
+      condition:
+        lambda: !lambda |-
+          return id(ptt_held);
+      then:
+      # Keep the audio stream alive with zeros until HA emits STT_VAD_END.
+      # voice_assistant.stop sends an abort and must not be used to submit speech.
+      - microphone.mute: panel_microphone
+      - lambda: !lambda |-
+          id(ptt_held) = false;
+          if (id(voice_phase) == 1) {
+            // A quick tap before listening begins cancels this attempt.
+            ESP_LOGD("ptt", "Released before listening; cancelling");
+            id(va).request_stop();
+            id(voice_cancelled) = true;
+            id(request_pending) = false;
+            id(pipeline_done) = true;
+            id(voice_phase) = 0;
+          } else if (id(voice_phase) == 2) {
+            ESP_LOGD("ptt", "Released; microphone muted, waiting for silence detection");
+            id(voice_phase) = 3;
+          } else {
+            // HA may already be processing or speaking after detecting a pause.
+            ESP_LOGD("ptt", "Released after speech capture; keeping request active");
+          }
+          id(phase_since) = millis();
+      - switch.turn_on: amplifier
+      - script.execute: refresh_ui
+- id: stop_voice
+  mode: restart
+  then:
+  - script.execute: cancel_assist
+  # Stop this panel's media stream. This does not issue a group-wide STOP.
+  - media_player.stop:
+      id: panel_media_player
+      announcement: false
+  - script.execute: reset_music_ducking
+- id: cancel_assist
+  mode: restart
+  then:
+  - microphone.mute: panel_microphone
+  - lambda: !lambda |-
+      id(voice_cancelled) = true;
+      id(ptt_held) = false;
+      if (id(voice_phase) == 1) {
+        id(request_pending) = false;
+        id(pipeline_done) = true;
+      }
+      id(phase_since) = millis();
+      id(voice_phase) = 0;
+  - voice_assistant.stop: {}
+  - script.execute: release_microphone
+  - media_player.stop:
+      id: panel_media_player
+      announcement: true
+  - switch.turn_on: amplifier
+  - script.execute: refresh_ui
+- id: restart_hold
+  mode: restart
+  then:
+  - delay: 3s
+  - button.press: panel_restart
+- id: refresh_ui
+  mode: restart
+  then:
+  - lambda: !lambda |
+      if (!id(ui_ready)) return;
+      const bool online = id(ha_api).is_connected_with_state_subscription();
+      auto now = id(ha_time).now();
+      if (now.is_valid()) {
+        lv_label_set_text(id(clock_label), now.strftime("%H:%M").c_str());
+        lv_label_set_text(id(date_label), now.strftime("%a %d %b").c_str());
+      }
+      lv_label_set_text(id(connection_label), online ? "HOME ASSISTANT" : "CONNECTING...");
+      lv_obj_set_style_text_color(id(connection_label), lv_color_hex(online ? 0x59D9B4 : 0xF4B860), 0);
+      char env[64];
+      const float t = id(room_temperature).state, h = id(room_humidity).state;
+      if (online && std::isfinite(t) && std::isfinite(h)) snprintf(env, sizeof(env), "%.1f C  /  %.0f%% humidity", t, h);
+      else if (online && std::isfinite(t)) snprintf(env, sizeof(env), "%.1f C indoors", t);
+      else snprintf(env, sizeof(env), "Room sensors not linked");
+      lv_label_set_text(id(environment_label), env);
+      const char *status = "Ready to listen";
+      uint32_t accent = 0x59D9B4;
+      const bool music_playing = id(panel_media_player).state == media_player::MEDIA_PLAYER_STATE_PLAYING;
+      const bool music_paused = id(panel_media_player).state == media_player::MEDIA_PLAYER_STATE_PAUSED;
+      const bool sendspin_playing = id(sendspin_source).get_state() == media_source::MediaSourceState::PLAYING;
+      if (music_playing && !id(request_pending)) {
+        status = sendspin_playing ? "Sendspin - stop to talk" : "Playing - stop to talk";
+        accent = 0x8AA7FF;
+        if (sendspin_playing) {
+          lv_label_set_text(id(request_text), id(sendspin_title).state.empty() ? "Sendspin audio" : id(sendspin_title).state.c_str());
+          lv_label_set_text(id(reply_text), id(sendspin_artist).state.empty() ? "Playing from your Sendspin server." : id(sendspin_artist).state.c_str());
+        }
+      }
+      else if (music_paused && !id(request_pending)) { status = "Paused - stop to talk"; accent = 0xF4B860; }
+      else if (!id(assist_connected)) { status = "Connect Assist in HA"; accent = 0xF4B860; }
+      else if (id(microphone_muted).state) { status = "Microphone muted"; accent = 0xF4B860; }
+      else if (id(voice_cancelled) && id(request_pending)) { status = "Finishing request..."; accent = 0xF4B860; }
+      else if (id(voice_phase) == 1) { status = "Starting - keep holding"; accent = 0x8AA7FF; }
+      else if (id(voice_phase) == 2) { status = "Listening - speak now"; accent = 0x59D9B4; }
+      else if (id(voice_phase) == 3) { status = "Thinking..."; accent = 0xF4B860; }
+      else if (id(voice_phase) == 4) { status = "Speaking..."; accent = 0x8AA7FF; }
+      else if (id(voice_phase) == 5) { status = "Please try again"; accent = 0xFF8B93; }
+      lv_label_set_text(id(voice_status), status);
+      lv_obj_set_style_text_color(id(voice_status), lv_color_hex(accent), 0);
+      lv_label_set_text(id(ptt_label), id(ptt_held) ? "RELEASE TO SEND" : "HOLD TO TALK");
+      lv_obj_set_style_bg_color(id(ptt_button), lv_color_hex(id(ptt_held) ? 0x32BA98 : 0x6D8EFF), 0);
+      // Never disable the widget while held: it must receive the release event.
+      const bool ready = id(assist_connected) && !id(microphone_muted).state && !id(request_pending) && !id(va).is_running() && id(panel_microphone).is_stopped() && id(panel_media_player).state == media_player::MEDIA_PLAYER_STATE_IDLE && id(panel_speaker).is_stopped();
+      if (ready || id(ptt_held)) lv_obj_clear_state(id(ptt_button), LV_STATE_DISABLED);
+      else lv_obj_add_state(id(ptt_button), LV_STATE_DISABLED);
+      lv_label_set_text(id(mute_label), id(microphone_muted).state ? "UNMUTE MIC" : "MUTE MIC");
+      lv_obj_set_style_bg_color(id(mute_button), lv_color_hex(id(microphone_muted).state ? 0x68472F : 0x253249), 0);
+      if (!lv_obj_has_state(id(volume_slider), LV_STATE_PRESSED)) lv_slider_set_value(id(volume_slider), (int) id(voice_volume).state, LV_ANIM_OFF);
+      if (!lv_obj_has_state(id(brightness_slider), LV_STATE_PRESSED)) lv_slider_set_value(id(brightness_slider), (int) id(screen_brightness).state, LV_ANIM_OFF);
+      char value[20];
+      if (id(panel_media_player).is_muted()) snprintf(value, sizeof(value), "MUTED");
+      else snprintf(value, sizeof(value), "%.0f%%", id(voice_volume).state);
+      lv_label_set_text(id(volume_value), value);
+      snprintf(value, sizeof(value), "%.0f%%", id(screen_brightness).state);
+      lv_label_set_text(id(brightness_value), value);
+
+      {
+        const std::string state = id(room_1_state).state;
+        const bool linked = online && (state == "on" || state == "off");
+        const bool on = linked && state == "on";
+        lv_label_set_text(id(room_1_status), !online ? "OFFLINE" : !linked ? "NOT LINKED" : on ? "ON" : "OFF");
+        lv_obj_set_style_bg_color(id(room_1_button), lv_color_hex(on ? 0x214D4B : 0x172338), 0);
+        lv_obj_set_style_text_color(id(room_1_status), lv_color_hex(on ? 0x70E5C4 : 0x9BAEC8), 0);
+        if (linked) lv_obj_clear_state(id(room_1_button), LV_STATE_DISABLED);
+        else lv_obj_add_state(id(room_1_button), LV_STATE_DISABLED);
+      }
+
+      {
+        const std::string state = id(room_2_state).state;
+        const bool linked = online && (state == "on" || state == "off");
+        const bool on = linked && state == "on";
+        lv_label_set_text(id(room_2_status), !online ? "OFFLINE" : !linked ? "NOT LINKED" : on ? "ON" : "OFF");
+        lv_obj_set_style_bg_color(id(room_2_button), lv_color_hex(on ? 0x214D4B : 0x172338), 0);
+        lv_obj_set_style_text_color(id(room_2_status), lv_color_hex(on ? 0x70E5C4 : 0x9BAEC8), 0);
+        if (linked) lv_obj_clear_state(id(room_2_button), LV_STATE_DISABLED);
+        else lv_obj_add_state(id(room_2_button), LV_STATE_DISABLED);
+      }
+
+      {
+        const std::string state = id(room_3_state).state;
+        const bool linked = online && (state == "on" || state == "off");
+        const bool on = linked && state == "on";
+        lv_label_set_text(id(room_3_status), !online ? "OFFLINE" : !linked ? "NOT LINKED" : on ? "ON" : "OFF");
+        lv_obj_set_style_bg_color(id(room_3_button), lv_color_hex(on ? 0x214D4B : 0x172338), 0);
+        lv_obj_set_style_text_color(id(room_3_status), lv_color_hex(on ? 0x70E5C4 : 0x9BAEC8), 0);
+        if (linked) lv_obj_clear_state(id(room_3_button), LV_STATE_DISABLED);
+        else lv_obj_add_state(id(room_3_button), LV_STATE_DISABLED);
+      }
+
+      {
+        const std::string state = id(room_4_state).state;
+        const bool linked = online && (state == "on" || state == "off");
+        const bool on = linked && state == "on";
+        lv_label_set_text(id(room_4_status), !online ? "OFFLINE" : !linked ? "NOT LINKED" : on ? "ON" : "OFF");
+        lv_obj_set_style_bg_color(id(room_4_button), lv_color_hex(on ? 0x214D4B : 0x172338), 0);
+        lv_obj_set_style_text_color(id(room_4_status), lv_color_hex(on ? 0x70E5C4 : 0x9BAEC8), 0);
+        if (linked) lv_obj_clear_state(id(room_4_button), LV_STATE_DISABLED);
+        else lv_obj_add_state(id(room_4_button), LV_STATE_DISABLED);
+      }
+interval:
+- interval: 500ms
+  then:
+  - lambda: !lambda |
+      const uint32_t now = millis();
+      if (id(ptt_held) && now - id(press_since) > 30000) id(ptt_release).execute();
+      // Complete the voice request after its announcement drains. Music may continue;
+      // the independent PTT guard still requires all output to stop.
+      if (id(request_pending) && id(pipeline_done) && !id(ptt_held) && !id(va).is_running() && id(panel_media_player).state != media_player::MEDIA_PLAYER_STATE_ANNOUNCING && id(announcement_speaker).is_stopped()) {
+        id(request_pending) = false;
+        id(voice_phase) = 0;
+      }
+      // Recover an unanswered request; never impose a time limit on active playback.
+      if (id(request_pending) && !id(ptt_held) && id(panel_media_player).state == media_player::MEDIA_PLAYER_STATE_IDLE && id(panel_speaker).is_stopped() && now - id(phase_since) > 60000) {
+        id(request_pending) = false;
+        id(pipeline_done) = true;
+        id(stop_voice).execute();
+        id(voice_phase) = 5;
+        id(phase_since) = now;
+        lv_label_set_text(id(reply_text), "No response. Check your Assist pipeline, then try again.");
+      }
+      if (id(voice_phase) == 5 && now - id(phase_since) > 8000) id(voice_phase) = 0;
+  - if:
+      condition:
+        lambda: !lambda |-
+          return !id(screen_dimmed) && !id(request_pending) && id(panel_media_player).state == media_player::MEDIA_PLAYER_STATE_IDLE && millis() - id(last_touch) > 120000;
+      then:
+      - light.turn_on:
+          id: backlight
+          brightness: 15%
+      - lambda: !lambda |-
+          id(screen_dimmed) = true;
+  - script.execute: refresh_ui
+lvgl:
+  displays:
+  - panel_display
+  touchscreens:
+  - panel_touch
+  color_depth: 16
+  buffer_size: 25%
+  default_font: montserrat_20
+  bg_color: 725536
+  text_color: 15594495
+  pages:
+  - id: home_page
+    bg_color: 725536
+    scrollable: false
+    pad_all: 0
+    widgets:
+    - label:
+        x: 24
+        y: 16
+        text: ${panel_title}
+        text_font: montserrat_36
+        text_color: 15594495
+        width: 280
+    - label:
+        x: 26
+        y: 62
+        text: YOUR HOME, AT A TOUCH
+        text_font: montserrat_14
+        text_color: 10202824
+        width: 300
+    - label:
+        x: 350
+        y: 30
+        text: Room sensors not linked
+        text_font: montserrat_20
+        text_color: 10202824
+        width: 290
+        id: environment_label
+    - label:
+        x: 646
+        y: 32
+        text: CONNECTING...
+        text_font: montserrat_14
+        text_color: 5888436
+        width: 190
+        id: connection_label
+    - label:
+        x: 850
+        y: 10
+        text: --:--
+        text_font: montserrat_40
+        text_color: 15594495
+        width: 150
+        id: clock_label
+        text_align: RIGHT
+    - label:
+        x: 834
+        y: 58
+        text: Waiting for time
+        text_font: montserrat_16
+        text_color: 10202824
+        width: 166
+        id: date_label
+        text_align: RIGHT
+    - label:
+        x: 24
+        y: 104
+        text: ROOM LIGHTS
+        text_font: montserrat_14
+        text_color: 10202824
+        width: 300
+    - button:
+        id: room_1_button
+        x: 24
+        y: 134
+        width: 290
+        height: 124
+        bg_color: 1516344
+        border_width: 0
+        radius: 18
+        pad_all: 0
+        shadow_width: 0
+        widgets:
+        - label:
+            x: 22
+            y: 23
+            text: ${room_1_name}
+            text_font: montserrat_24
+            text_color: 15594495
+            width: 246
+        - label:
+            x: 22
+            y: 76
+            text: NOT LINKED
+            text_font: montserrat_16
+            text_color: 10202824
+            width: 200
+            id: room_1_status
+        on_click:
+        - if:
+            condition:
+              lambda: !lambda |-
+                return id(ha_api).is_connected_with_state_subscription() && (id(room_1_state).state == "on" || id(room_1_state).state == "off");
+            then:
+            - homeassistant.action:
+                action: light.toggle
+                data:
+                  entity_id: ${room_1_entity}
+        state:
+          disabled: true
+        disabled:
+          bg_opa: 60%
+    - button:
+        id: room_2_button
+        x: 330
+        y: 134
+        width: 290
+        height: 124
+        bg_color: 1516344
+        border_width: 0
+        radius: 18
+        pad_all: 0
+        shadow_width: 0
+        widgets:
+        - label:
+            x: 22
+            y: 23
+            text: ${room_2_name}
+            text_font: montserrat_24
+            text_color: 15594495
+            width: 246
+        - label:
+            x: 22
+            y: 76
+            text: NOT LINKED
+            text_font: montserrat_16
+            text_color: 10202824
+            width: 200
+            id: room_2_status
+        on_click:
+        - if:
+            condition:
+              lambda: !lambda |-
+                return id(ha_api).is_connected_with_state_subscription() && (id(room_2_state).state == "on" || id(room_2_state).state == "off");
+            then:
+            - homeassistant.action:
+                action: light.toggle
+                data:
+                  entity_id: ${room_2_entity}
+        state:
+          disabled: true
+        disabled:
+          bg_opa: 60%
+    - button:
+        id: room_3_button
+        x: 24
+        y: 274
+        width: 290
+        height: 124
+        bg_color: 1516344
+        border_width: 0
+        radius: 18
+        pad_all: 0
+        shadow_width: 0
+        widgets:
+        - label:
+            x: 22
+            y: 23
+            text: ${room_3_name}
+            text_font: montserrat_24
+            text_color: 15594495
+            width: 246
+        - label:
+            x: 22
+            y: 76
+            text: NOT LINKED
+            text_font: montserrat_16
+            text_color: 10202824
+            width: 200
+            id: room_3_status
+        on_click:
+        - if:
+            condition:
+              lambda: !lambda |-
+                return id(ha_api).is_connected_with_state_subscription() && (id(room_3_state).state == "on" || id(room_3_state).state == "off");
+            then:
+            - homeassistant.action:
+                action: light.toggle
+                data:
+                  entity_id: ${room_3_entity}
+        state:
+          disabled: true
+        disabled:
+          bg_opa: 60%
+    - button:
+        id: room_4_button
+        x: 330
+        y: 274
+        width: 290
+        height: 124
+        bg_color: 1516344
+        border_width: 0
+        radius: 18
+        pad_all: 0
+        shadow_width: 0
+        widgets:
+        - label:
+            x: 22
+            y: 23
+            text: ${room_4_name}
+            text_font: montserrat_24
+            text_color: 15594495
+            width: 246
+        - label:
+            x: 22
+            y: 76
+            text: NOT LINKED
+            text_font: montserrat_16
+            text_color: 10202824
+            width: 200
+            id: room_4_status
+        on_click:
+        - if:
+            condition:
+              lambda: !lambda |-
+                return id(ha_api).is_connected_with_state_subscription() && (id(room_4_state).state == "on" || id(room_4_state).state == "off");
+            then:
+            - homeassistant.action:
+                action: light.toggle
+                data:
+                  entity_id: ${room_4_entity}
+        state:
+          disabled: true
+        disabled:
+          bg_opa: 60%
+    - label:
+        x: 26
+        y: 417
+        text: Tap a room to toggle its light.
+        text_font: montserrat_18
+        text_color: 10202824
+        width: 570
+    - obj:
+        x: 644
+        y: 98
+        width: 356
+        height: 362
+        bg_color: 1516344
+        border_width: 0
+        radius: 20
+        pad_all: 0
+        scrollable: false
+        widgets:
+        - label:
+            x: 20
+            y: 16
+            text: VOICE ASSISTANT
+            text_font: montserrat_14
+            text_color: 10202824
+            width: 316
+        - label:
+            x: 20
+            y: 40
+            text: Connect Assist in HA
+            text_font: montserrat_20
+            text_color: 5888436
+            width: 316
+            id: voice_status
+        - button:
+            id: ptt_button
+            x: 20
+            y: 77
+            width: 316
+            height: 64
+            bg_color: 7180031
+            border_width: 0
+            radius: 18
+            pad_all: 0
+            shadow_width: 0
+            widgets:
+            - label:
+                id: ptt_label
+                text: HOLD TO TALK
+                align: CENTER
+                text_font: montserrat_22
+                text_color: 463650
+            on_press:
+            - script.execute: ptt_start
+            on_release:
+            - script.execute: ptt_release
+            on_press_lost:
+            - script.execute: ptt_release
+            disabled:
+              bg_opa: 40%
+        - obj:
+            x: 20
+            y: 153
+            width: 316
+            height: 130
+            bg_color: 989482
+            border_width: 0
+            radius: 12
+            pad_all: 12
+            scrollbar_mode: AUTO
+            layout:
+              type: FLEX
+              flex_flow: COLUMN
+              flex_align_main: START
+            widgets:
+            - label:
+                text: YOU
+                text_font: montserrat_14
+                text_color: 5888436
+            - label:
+                id: request_text
+                text: Hold the button and speak.
+                width: 100%
+                long_mode: WRAP
+                text_font: montserrat_18
+                text_color: 15594495
+            - label:
+                text: ASSISTANT
+                text_font: montserrat_14
+                text_color: 9086975
+                pad_top: 8
+            - label:
+                id: reply_text
+                text: Your reply will appear here.
+                width: 100%
+                long_mode: WRAP
+                text_font: montserrat_18
+                text_color: 15594495
+        - button:
+            id: mute_button
+            x: 20
+            y: 297
+            width: 152
+            height: 49
+            bg_color: 2437705
+            border_width: 0
+            radius: 12
+            pad_all: 0
+            shadow_width: 0
+            widgets:
+            - label:
+                id: mute_label
+                text: MUTE MIC
+                align: CENTER
+                text_font: montserrat_16
+                text_color: 15594495
+            on_click:
+            - switch.toggle: microphone_muted
+        - button:
+            id: stop_button
+            x: 184
+            y: 297
+            width: 152
+            height: 49
+            bg_color: 2437705
+            border_width: 0
+            radius: 12
+            pad_all: 0
+            shadow_width: 0
+            widgets:
+            - label:
+                text: STOP / RESET
+                align: CENTER
+                text_font: montserrat_16
+                text_color: 15594495
+            on_press:
+            - script.execute: stop_voice
+            - script.execute: restart_hold
+            on_release:
+            - script.stop: restart_hold
+            on_press_lost:
+            - script.stop: restart_hold
+    - obj:
+        x: 24
+        y: 480
+        width: 976
+        height: 96
+        bg_color: 1516344
+        border_width: 0
+        radius: 20
+        pad_all: 0
+        scrollable: false
+        widgets:
+        - label:
+            x: 22
+            y: 18
+            text: VOICE VOLUME
+            text_font: montserrat_14
+            text_color: 10202824
+            width: 310
+        - label:
+            x: 396
+            y: 14
+            text: 55%
+            text_font: montserrat_20
+            text_color: 15594495
+            width: 60
+            id: volume_value
+            text_align: RIGHT
+        - slider:
+            id: volume_slider
+            x: 30
+            y: 63
+            width: 416
+            height: 10
+            min_value: 0
+            max_value: 100
+            value: 55
+            bg_color: 3425373
+            indicator:
+              bg_color: 7180031
+            knob:
+              bg_color: 15594495
+              pad_all: 10
+            on_release:
+            - number.set:
+                id: voice_volume
+                value: !lambda |-
+                  return lv_slider_get_value(id(volume_slider));
+        - label:
+            x: 518
+            y: 18
+            text: SCREEN BRIGHTNESS
+            text_font: montserrat_14
+            text_color: 10202824
+            width: 310
+        - label:
+            x: 892
+            y: 14
+            text: 80%
+            text_font: montserrat_20
+            text_color: 15594495
+            width: 60
+            id: brightness_value
+            text_align: RIGHT
+        - slider:
+            id: brightness_slider
+            x: 526
+            y: 63
+            width: 416
+            height: 10
+            min_value: 10
+            max_value: 100
+            value: 80
+            bg_color: 3425373
+            indicator:
+              bg_color: 5888436
+            knob:
+              bg_color: 15594495
+              pad_all: 10
+            on_release:
+            - number.set:
+                id: screen_brightness
+                value: !lambda |-
+                  return lv_slider_get_value(id(brightness_slider));
