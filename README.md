@@ -45,4 +45,4 @@ An ESPHome configuration that turns the **Guition JC1060P470C_I_W_Y** (7-inch 10
 
 ## Status
 
-The configuration passes schema validation and a full ESP32-P4 build on ESPHome 2026.9.0 / ESP-IDF 5.5.5. Some behaviour still needs confirming on real hardware: the push-to-talk and audio handoff fixes, Sendspin playback, and Ethernet/Wi-Fi failover.
+The configuration all works on a revision 1.3 board.
